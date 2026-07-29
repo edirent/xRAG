@@ -28,3 +28,7 @@ pretrained_model
 DeepSpeed
 experiments
 .vscode
+.env.local
+logs/
+outputs/
+cache/
