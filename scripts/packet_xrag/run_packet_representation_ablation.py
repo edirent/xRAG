@@ -24,7 +24,9 @@ from src.language_modeling.utils import XRAG_TOKEN
 from src.model import SFR, XMistralForCausalLM
 
 VARIANTS = ["V1_TITLE_SENTENCE", "V2_SENTENCE_ONLY", "V3_LOCAL_WINDOW_3", "V4_FORWARD_WINDOW_2", "V5_SUPPORT_DOCUMENT"]
-REFERENCE_V1_F1 = 63.019047619047605
+HISTORICAL_FIRST_100_F1 = 63.019047619047605
+OFFICIAL_FULL_500_F1 = 58.589785360838036
+OFFICIAL_FULL_500_TOLERANCE = 0.1
 MAX_RETRIEVER_LENGTH = 180
 
 
@@ -40,6 +42,7 @@ def parse_args():
     parser.add_argument("--decision-output", default="cache/results/packet_representation_ablation_decision.md")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--max-new-tokens", type=int, default=32)
+    parser.add_argument("--resume-after-protocol-audit", action="store_true")
     return parser.parse_args()
 
 
@@ -92,7 +95,7 @@ def build_variant_chunks(sample, variant):
 
 def exact_minimum_set_cover(chunks, gold):
     candidates = [i for i, chunk in enumerate(chunks) if chunk["covered_gold_fact_ids"]]
-    token_costs = [len(chunk["encoder_text"].split()) for chunk in chunks]
+    token_costs = [chunk.get("raw_retriever_token_count", len(chunk["encoder_text"].split())) for chunk in chunks]
     for size in range(1, len(candidates) + 1):
         valid = []
         for subset in itertools.combinations(candidates, size):
@@ -118,6 +121,15 @@ def load_locked_records(config_path, split_path, max_samples):
                 break
     assert set(found) == wanted
     return [found[sid] for sid in ids], config["validation_sample_ids"]
+
+
+def validate_validation_id_record(record, expected_ids):
+    expected_hash = hashlib.sha256("".join(expected_ids).encode()).hexdigest()
+    assert record["num_validation_samples"] == 500
+    assert len(expected_ids) == 500 and len(set(expected_ids)) == 500
+    assert record["sample_ids"] == expected_ids
+    assert record["split_hash"] == expected_hash
+    return expected_hash
 
 
 def add_token_stats(chunks, tokenizer):
@@ -158,6 +170,7 @@ def summarize(rows):
             "Substring": 100 * sum(r["substring_match"] for r in items) / len(items), "Avg chunks": sum(r["num_selected_chunks"] for r in items) / len(items),
             "Avg raw tokens/chunk": sum(c["raw_retriever_token_count"] for c in chunks) / len(chunks),
             "Avg used tokens/chunk": sum(c["used_retriever_token_count"] for c in chunks) / len(chunks),
+            "Avg used tokens/sample": sum(r["total_used_retriever_tokens"] for r in items) / len(items),
             "Truncation rate": 100 * sum(c["was_truncated"] for c in chunks) / len(chunks),
             "F1 delta vs V1": 100 * sum(r["short_f1"] for r in items) / len(items) - v1_f1,
             "Avg chunks delta vs V1": sum(r["num_selected_chunks"] for r in items) / len(items) - v1_chunks})
@@ -186,8 +199,8 @@ def write_outputs(rows, summary, args, split_hash, reproducible):
     best = max(summary, key=lambda row: row["Short F1"])
     path = choose_path(summary, reproducible)
     lines = ["# Packet Representation Ablation Decision", "", f"- Fixed validation split hash: `{split_hash}`",
-        f"- V1 projector checkpoint: `{args.projector_checkpoint}`", f"- V1 reproduced within 1.0 F1: {'Yes' if reproducible else 'No'}",
-        f"- V1 reproducibility gap: {summary[0]['Short F1'] - REFERENCE_V1_F1:.4f}",
+        f"- V1 projector checkpoint: `{args.projector_checkpoint}`", f"- Official V1 full-500 reproduced within 0.1 F1: {'Yes' if reproducible else 'No'}",
+        f"- V1 reproducibility gap: {summary[0]['Short F1'] - OFFICIAL_FULL_500_F1:.4f}",
         "- Historical 63.0190 reference scope: first 100 validation examples (`validation_generation_samples=100`)",
         "- Current requested scope: all 500 locked validation examples", "", "| Variant | Short EM | Short F1 | Clean F1 | Substring | Avg chunks | Truncation rate |",
         "|---|---:|---:|---:|---:|---:|---:|"]
@@ -198,15 +211,22 @@ def write_outputs(rows, summary, args, split_hash, reproducible):
     return path
 
 
+@torch.inference_mode()
 def main():
     args = parse_args()
     assert 1 <= args.max_samples <= 500 and torch.cuda.is_available() and torch.cuda.is_bf16_supported()
     device = torch.device(args.device); torch.cuda.set_device(device)
     records, all_validation_ids = load_locked_records(args.training_config, args.split_file, args.max_samples)
     split_hash = hashlib.sha256("".join(all_validation_ids).encode()).hexdigest()
+    ids_path = Path(args.validation_ids_output)
     ids_record = {"num_validation_samples": 500, "sample_ids": all_validation_ids, "source": "existing V1 split", "split_hash": split_hash}
-    Path(args.validation_ids_output).parent.mkdir(parents=True, exist_ok=True)
-    Path(args.validation_ids_output).write_text(json.dumps(ids_record, indent=2) + "\n")
+    if ids_path.exists():
+        locked_ids = json.loads(ids_path.read_text())
+        validate_validation_id_record(locked_ids, all_validation_ids)
+        assert locked_ids == ids_record, "locked validation ID record or split hash changed"
+    else:
+        ids_path.parent.mkdir(parents=True, exist_ok=True)
+        ids_path.write_text(json.dumps(ids_record, indent=2) + "\n")
 
     sfr_tokenizer = AutoTokenizer.from_pretrained(v1.SFR_MODEL_NAME)
     sfr_model = SFR.from_pretrained(v1.SFR_MODEL_NAME, torch_dtype=torch.bfloat16).eval().to(device)
@@ -227,10 +247,10 @@ def main():
         for variant in VARIANTS:
             for sample_index, sample in enumerate(records):
                 chunks, gold = build_variant_chunks(sample, variant)
+                add_token_stats(chunks, sfr_tokenizer)
                 selected_indices = exact_minimum_set_cover(chunks, gold)
                 selected = [chunks[i] for i in selected_indices]
                 assert selected_indices and set().union(*(set(c["covered_gold_fact_ids"]) for c in selected)) == gold
-                add_token_stats(selected, sfr_tokenizer)
                 embeddings = encode_chunks(selected, sfr_tokenizer, sfr_model, device)
                 assert embeddings.shape[0] == len(selected)
                 raw, _, generated_tokens = selector.generate_xrag_answer(tokenizer, model, xrag_token_id, sample["question"], embeddings, device, args.max_new_tokens)
@@ -250,13 +270,17 @@ def main():
                     print(json.dumps({"question": sample["question"], "gold_facts": sorted(gold), "variant": variant, "chunks": [c["encoder_text"] for c in selected], "prediction": short, "short_f1": short_f1}, ensure_ascii=False), flush=True)
             if variant == "V1_TITLE_SENTENCE" and args.max_samples == 500:
                 current = 100 * sum(r["short_f1"] for r in rows) / 500
-                if abs(current - REFERENCE_V1_F1) > 1.0:
+                reference = OFFICIAL_FULL_500_F1 if args.resume_after_protocol_audit else HISTORICAL_FIRST_100_F1
+                tolerance = OFFICIAL_FULL_500_TOLERANCE if args.resume_after_protocol_audit else 1.0
+                if abs(current - reference) > tolerance:
                     summary = summarize(rows)
                     write_outputs(rows, summary, args, split_hash, False)
-                    raise SystemExit(f"Path E: V1 F1 {current:.4f} does not reproduce {REFERENCE_V1_F1:.4f}")
+                    raise SystemExit(f"V1 stop: full-500 F1 {current:.4f} does not reproduce {reference:.4f}")
     assert len(rows) == args.max_samples * 5
     summary = summarize(rows)
-    path = write_outputs(rows, summary, args, split_hash, abs(summary[0]["Short F1"] - REFERENCE_V1_F1) <= 1.0)
+    reference = OFFICIAL_FULL_500_F1 if args.resume_after_protocol_audit else HISTORICAL_FIRST_100_F1
+    tolerance = OFFICIAL_FULL_500_TOLERANCE if args.resume_after_protocol_audit else 1.0
+    path = write_outputs(rows, summary, args, split_hash, abs(summary[0]["Short F1"] - reference) <= tolerance)
     print(json.dumps({"rows": len(rows), "summary": summary, "path": path, "final_100_accessed": False, "training_run": False}, indent=2), flush=True)
 
 
