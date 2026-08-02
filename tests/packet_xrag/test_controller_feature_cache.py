@@ -21,6 +21,15 @@ def packets():
     ]
 
 
+def complete_fields():
+    return {
+        "effective_split_hash": "split", "quarantine_hash": "quarantine",
+        "source_dataset_identifier": "dataset", "packet_construction_version": "packets",
+        "sfr_checkpoint_identifier": "sfr", "query_encoding_template_hash": "query",
+        "number_of_samples": 1, "number_of_packets": 2, "creation_command": "test",
+    }
+
+
 def test_embedding_shapes_round_trip_and_topk_consistency(tmp_path):
     embeddings = torch.tensor([
         [1.0, 0.0, 0.0, 0.0],
@@ -29,7 +38,7 @@ def test_embedding_shapes_round_trip_and_topk_consistency(tmp_path):
     ], dtype=torch.bfloat16)
     writer = ControllerFeatureWriter(tmp_path, hidden_size=4)
     record = writer.add(sample(), packets(), [0], embeddings)
-    writer.close()
+    writer.close(complete_fields())
     cache = ControllerFeatureCache(tmp_path)
     item = cache[0]
     assert len(cache) == 1

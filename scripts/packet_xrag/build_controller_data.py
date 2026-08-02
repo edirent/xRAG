@@ -3,7 +3,9 @@
 
 import argparse
 import hashlib
+import inspect
 import json
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -22,11 +24,15 @@ from src.packet_xrag.controller.feature_cache import (
     ControllerFeatureWriter,
     SPLIT_SEED,
     assert_no_overlap,
+    filter_quarantined_records,
+    load_effective_split_ids,
+    load_quarantine,
     make_candidate_packets,
     ordered_ids_sha256,
     overlap_audit,
+    quarantine_fraction,
     sample_id,
-    split_records,
+    sha256_file,
 )
 
 
@@ -35,6 +41,9 @@ def parse_args(argv=None):
     parser.add_argument("--split-file", default="cache/projector/packet_projector_calibration/data_split.json")
     parser.add_argument("--v1-training-config", default="cache/projector/packet_projector_calibration/last/training_config.json")
     parser.add_argument("--output-root", default="cache/controller")
+    parser.add_argument(
+        "--quarantine-file", default="cache/controller/splits/controller_quarantine.json"
+    )
     parser.add_argument("--device", default="cuda:1")
     parser.add_argument("--seed", type=int, default=SPLIT_SEED)
     parser.add_argument("--max-length", type=int, default=180)
@@ -62,37 +71,37 @@ def code_version():
     }
 
 
-def write_split_record(path, name, records, seed, version):
-    ids = [sample_id(item[0]) for item in records]
-    payload = {
-        "split": name,
-        "sample_count": len(ids),
-        "ordered_sample_ids": ids,
-        "sha256": ordered_ids_sha256(ids),
-        "source_dataset": "hotpotqa/hotpot_qa:distractor:train; locked V1 source pool",
-        "seed": seed,
-        "creation_code_version": version,
-    }
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+def load_preserved_split(path, expected_name, expected_count, expected_seed):
+    payload = json.loads(Path(path).read_text())
+    ids = payload["ordered_sample_ids"]
+    if payload.get("split") != expected_name:
+        raise ValueError(f"preserved split name mismatch: {path}")
+    if payload.get("sample_count") != expected_count or len(ids) != expected_count:
+        raise ValueError(f"preserved split count mismatch: {path}")
+    if payload.get("seed") != expected_seed:
+        raise ValueError(f"preserved split seed mismatch: {path}")
+    if payload.get("sha256") != ordered_ids_sha256(ids):
+        raise ValueError(f"preserved split hash mismatch: {path}")
     return payload
 
 
 def prepare_splits(args, source_records, benchmark_records, output_root):
     if args.seed != SPLIT_SEED:
         raise ValueError(f"controller split seed is locked to {SPLIT_SEED}")
-    train, dev = split_records(source_records, args.seed)
+    split_dir = output_root / "splits"
+    train_payload = load_preserved_split(
+        split_dir / "controller_train_ids.json", "controller_train", 4500, args.seed
+    )
+    dev_payload = load_preserved_split(
+        split_dir / "controller_internal_dev_ids.json", "controller_internal_dev", 500,
+        args.seed,
+    )
+    records_by_id = {sample_id(item[0]): item for item in source_records}
+    train = [records_by_id[sid] for sid in train_payload["ordered_sample_ids"]]
+    dev = [records_by_id[sid] for sid in dev_payload["ordered_sample_ids"]]
     overlaps = overlap_audit({"train": train, "internal_dev": dev, "benchmark": benchmark_records})
     assert_no_overlap(overlaps)
-    split_dir = output_root / "splits"
-    split_dir.mkdir(parents=True, exist_ok=True)
     version = code_version()
-    train_payload = write_split_record(
-        split_dir / "controller_train_ids.json", "controller_train", train, args.seed, version
-    )
-    dev_payload = write_split_record(
-        split_dir / "controller_internal_dev_ids.json", "controller_internal_dev", dev,
-        args.seed, version,
-    )
     audit = {
         "status": "PASS",
         "source_sample_count": len(source_records),
@@ -120,6 +129,70 @@ def prepare_splits(args, source_records, benchmark_records, output_root):
     ]
     (split_dir / "controller_split_audit.md").write_text("\n".join(lines) + "\n")
     return train, dev, audit
+
+
+def apply_and_audit_quarantine(train, dev, benchmark, quarantine_file, split_dir):
+    payload = load_quarantine(quarantine_file)
+    entries = payload["entries"]
+    quarantined_ids = {str(entry["sample_id"]) for entry in entries}
+    train_by_id = {sample_id(item[0]): item for item in train}
+    if quarantined_ids - set(train_by_id):
+        raise RuntimeError("quarantine contains a non-training sample")
+    evaluation_ids = {sample_id(item[0]) for item in dev + benchmark}
+    if quarantined_ids & evaluation_ids:
+        raise RuntimeError("evaluation sample appears in training quarantine")
+    for entry in entries:
+        sample = train_by_id[str(entry["sample_id"])][0]
+        matching = [sentences for title, sentences in zip(
+            sample["context"]["title"], sample["context"]["sentences"]
+        ) if title == entry["title"]]
+        available = list(range(len(matching[0]))) if len(matching) == 1 else []
+        if (entry["reason"] != "supporting_fact_sentence_out_of_range" or
+                available != entry["available_sentence_ids"] or
+                entry["requested_sentence_id"] in available):
+            raise RuntimeError("quarantine evidence does not reproduce source annotation")
+        try:
+            make_candidate_packets(sample)
+        except ValueError as error:
+            expected = f"('{entry['title']}', {entry['requested_sentence_id']})"
+            if expected not in str(error):
+                raise RuntimeError("quarantine failure differs from audited annotation") from error
+        else:
+            raise RuntimeError("quarantined annotation no longer fails packet mapping")
+    rate = quarantine_fraction(len(train), len(entries))
+    if rate >= 0.001:
+        raise RuntimeError(f"training quarantine fraction must be below 0.1%: {rate}")
+    effective = filter_quarantined_records(train, quarantine_file)
+    original_manifest = split_dir / "controller_train_ids.json"
+    effective_ids = load_effective_split_ids(original_manifest, quarantine_file)
+    if [sample_id(item[0]) for item in effective] != effective_ids:
+        raise RuntimeError("effective record order differs from central ID loader")
+    if len(effective) != 4499 or quarantined_ids & set(effective_ids):
+        raise RuntimeError("effective controller-train quarantine assertion failed")
+    dev_payload = load_preserved_split(
+        split_dir / "controller_internal_dev_ids.json", "controller_internal_dev", 500,
+        SPLIT_SEED,
+    )
+    effective_payload = {
+        "split": "controller_effective_train",
+        "sample_count": len(effective_ids),
+        "ordered_sample_ids": effective_ids,
+        "sha256": ordered_ids_sha256(effective_ids),
+        "source_dataset": "hotpotqa/hotpot_qa:distractor:train; preserved controller train minus quarantine",
+        "seed": SPLIT_SEED,
+        "original_train_count": len(train),
+        "original_train_hash": json.loads(original_manifest.read_text())["sha256"],
+        "quarantined_count": len(entries),
+        "quarantine_hash": sha256_file(quarantine_file),
+        "quarantine_rate": rate,
+        "effective_train_hash": ordered_ids_sha256(effective_ids),
+        "internal_dev_hash": dev_payload["sha256"],
+        "creation_code_version": code_version(),
+    }
+    (split_dir / "controller_effective_train_ids.json").write_text(
+        json.dumps(effective_payload, indent=2, sort_keys=True) + "\n"
+    )
+    return effective, effective_payload
 
 
 def preflight_gold_mappings(named_records):
@@ -167,7 +240,8 @@ def encode_samples(tokenizer, model, entries, device, max_length):
     return outputs
 
 
-def build_split_cache(name, records, tokenizer, model, args, output_root):
+def build_split_cache(name, records, tokenizer, model, args, output_root,
+                      split_hash, quarantine_hash):
     feature_dir = output_root / "features" / f"{name}_features"
     packet_path = output_root / "packets" / f"{name}_packets.jsonl"
     writer = ControllerFeatureWriter(feature_dir)
@@ -209,7 +283,37 @@ def build_split_cache(name, records, tokenizer, model, args, output_root):
         "sample_batch_size": args.sample_batch_size,
         "packet_metadata_path": str(packet_path.resolve()),
         "gold_support_count": support_count,
+        "effective_split_hash": split_hash,
+        "quarantine_hash": quarantine_hash,
+        "source_dataset_identifier": "hotpotqa/hotpot_qa:distractor:train",
+        "packet_construction_version": hashlib.sha256(
+            inspect.getsource(make_candidate_packets).encode()
+        ).hexdigest(),
+        "sfr_checkpoint_identifier": v1.SFR_MODEL_NAME,
+        "query_encoding_template_hash": hashlib.sha256(
+            "{question} (verbatim; no instruction)".encode()
+        ).hexdigest(),
+        "number_of_samples": len(records),
+        "number_of_packets": packet_count,
+        "creation_command": shlex.join(sys.argv),
     })
+    packet_manifest = {
+        key: manifest[key] for key in (
+            "completion_status", "effective_split_hash", "quarantine_hash",
+            "source_dataset_identifier", "packet_construction_version",
+            "sfr_checkpoint_identifier", "query_encoding_template_hash",
+            "number_of_samples", "number_of_packets", "creation_command",
+        )
+    }
+    packet_manifest.update({
+        "format": "packet-xrag-controller-packets-v1",
+        "packet_metadata_path": str(packet_path.resolve()),
+        "ordered_ids_sha256": manifest["ordered_ids_sha256"],
+    })
+    (packet_path.parent / f"{name}_packets.manifest.json").write_text(
+        json.dumps(packet_manifest, indent=2, sort_keys=True) + "\n"
+    )
+    (feature_dir / "INVALID_DO_NOT_USE").unlink(missing_ok=True)
     return {**manifest, "packet_metadata_bytes": packet_path.stat().st_size}
 
 
@@ -219,7 +323,12 @@ def main(argv=None):
     print("Recovering locked 5,000 source and benchmark-500 records", flush=True)
     source, benchmark = locked_records(args.split_file, args.v1_training_config)
     train, dev, _ = prepare_splits(args, source, benchmark, output_root)
-    preflight_gold_mappings({"train": train, "internal_dev": dev, "benchmark": benchmark})
+    effective_train, effective_manifest = apply_and_audit_quarantine(
+        train, dev, benchmark, args.quarantine_file, output_root / "splits"
+    )
+    preflight_gold_mappings({
+        "effective_train": effective_train, "internal_dev": dev, "benchmark": benchmark
+    })
     print("Stage-0 isolation gate passed; loading frozen SFR", flush=True)
     tokenizer = AutoTokenizer.from_pretrained(v1.SFR_MODEL_NAME)
     model = SFR.from_pretrained(v1.SFR_MODEL_NAME, torch_dtype=torch.bfloat16).eval().to(args.device)
@@ -228,10 +337,22 @@ def main(argv=None):
     if sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad):
         raise RuntimeError("SFR must remain frozen")
     manifests = {}
-    for name, records in (("train", train), ("internal_dev", dev), ("benchmark", benchmark)):
-        manifests[name] = build_split_cache(name, records, tokenizer, model, args, output_root)
+    quarantine_hash = effective_manifest["quarantine_hash"]
+    split_hashes = {
+        "train": effective_manifest["effective_train_hash"],
+        "internal_dev": effective_manifest["internal_dev_hash"],
+        "benchmark": EXPECTED_SPLIT_HASH,
+    }
+    for name, records in (("train", effective_train), ("internal_dev", dev),
+                          ("benchmark", benchmark)):
+        manifests[name] = build_split_cache(
+            name, records, tokenizer, model, args, output_root, split_hashes[name],
+            quarantine_hash,
+        )
     packet_audit = {
-        "status": "PASS", "gold_mapping_complete": True,
+        "status": "PASS", "completion_status": "complete", "gold_mapping_complete": True,
+        "quarantined_training_samples": 1,
+        "training_quarantine_rate": effective_manifest["quarantine_rate"],
         "splits": {name: {key: value for key, value in manifest.items()
                            if key in ("num_queries", "num_packets", "gold_support_count",
                                       "ordered_ids_sha256", "packet_metadata_bytes")}
@@ -240,6 +361,7 @@ def main(argv=None):
     (output_root / "packets" / "packet_cache_audit.json").write_text(
         json.dumps(packet_audit, indent=2, sort_keys=True) + "\n"
     )
+    (output_root / "packets" / "INVALID_DO_NOT_USE").unlink(missing_ok=True)
     feature_audit = [
         "# Controller Feature Cache Audit", "", "- Status: PASS",
         "- SFR: `Salesforce/SFR-Embedding-Mistral` (frozen; 0 trainable parameters)",
@@ -247,7 +369,9 @@ def main(argv=None):
         "- Embeddings: BF16, 4096 dimensions, memory-mapped",
         "- TOPK: descending query/packet cosine with packet-ID tie break",
         "- MMR: full ranking, lambda=0.5, frozen benchmark tie breaks",
-        "- Gold support mapping: complete for every sample",
+        "- Gold support mapping: complete for every effective/evaluation sample",
+        "- Original/effective controller train: 4500 / 4499",
+        "- Quarantined controller train: 1 (0.022222%)",
         "- Final 100: not accessed",
     ]
     for name, manifest in manifests.items():
@@ -259,11 +383,15 @@ def main(argv=None):
         "\n".join(feature_audit) + "\n"
     )
     decision = [
-        "# Stage 0 Decision", "", "- Decision: PASS — proceed to Stage 1",
+        "# Stage 0 Recovery Decision", "", "- Decision: PASS — proceed to Stage 1",
         "- Split isolation: PASS", "- Candidate gold mapping: PASS",
-        "- Frozen feature cache: PASS", "- Final 100 accessed: no",
+        "- Original/effective train: 4500 / 4499",
+        "- Quarantined train: 1 (0.022222%; below 0.1%)",
+        "- Effective train/internal-dev/benchmark mapping failures: 0 / 0 / 0",
+        "- All cache manifests: complete", "- Frozen feature cache: PASS",
+        "- Final 100 accessed: no", "- Final 100 runs: 0",
     ]
-    (output_root / "stage0_decision.md").write_text("\n".join(decision) + "\n")
+    (output_root / "stage0_recovery_decision.md").write_text("\n".join(decision) + "\n")
     print(json.dumps({"status": "PASS", "splits": packet_audit["splits"]}, indent=2), flush=True)
 
 

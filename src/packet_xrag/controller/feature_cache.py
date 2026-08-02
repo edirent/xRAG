@@ -13,8 +13,15 @@ import torch.nn.functional as F
 
 
 FORMAT = "packet-xrag-controller-features-v1"
+QUARANTINE_SCHEMA_VERSION = 1
 SPLIT_SEED = 20260803
 HIDDEN_SIZE = 4096
+REQUIRED_COMPLETE_MANIFEST_FIELDS = {
+    "effective_split_hash", "quarantine_hash", "source_dataset_identifier",
+    "packet_construction_version", "sfr_checkpoint_identifier",
+    "query_encoding_template_hash", "number_of_samples", "number_of_packets",
+    "creation_command",
+}
 
 
 def sample_id(sample):
@@ -23,6 +30,84 @@ def sample_id(sample):
 
 def ordered_ids_sha256(ids):
     return hashlib.sha256("".join(ids).encode("utf-8")).hexdigest()
+
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def load_quarantine(quarantine_file):
+    """Load and strictly validate the immutable controller quarantine input."""
+    path = Path(quarantine_file)
+    payload = json.loads(path.read_text())
+    if payload.get("schema_version") != QUARANTINE_SCHEMA_VERSION:
+        raise ValueError("unsupported controller quarantine schema")
+    entries = payload.get("entries")
+    if not isinstance(entries, list):
+        raise ValueError("quarantine entries must be a list")
+    required = {
+        "sample_id", "split", "reason", "title", "requested_sentence_id",
+        "available_sentence_ids", "action",
+    }
+    ids = []
+    for entry in entries:
+        if set(entry) != required:
+            raise ValueError("invalid quarantine entry fields")
+        if entry["split"] != "controller_train":
+            raise ValueError("only controller-training samples may be quarantined")
+        if entry["action"] != "exclude_from_all_controller_training_and_label_generation":
+            raise ValueError("invalid quarantine action")
+        ids.append(str(entry["sample_id"]))
+    if len(ids) != len(set(ids)):
+        raise ValueError("duplicate quarantine sample IDs")
+    return payload
+
+
+def load_effective_split_ids(split_file, quarantine_file):
+    """Return original ordered training IDs minus the centrally quarantined IDs."""
+    split = json.loads(Path(split_file).read_text())
+    original_ids = list(split["ordered_sample_ids"])
+    if split.get("sample_count") != len(original_ids):
+        raise ValueError("original controller-train count mismatch")
+    if split.get("sha256") != ordered_ids_sha256(original_ids):
+        raise ValueError("original controller-train hash mismatch")
+    quarantined = {str(entry["sample_id"]) for entry in load_quarantine(quarantine_file)["entries"]}
+    unknown = quarantined - set(original_ids)
+    if unknown:
+        raise ValueError(f"quarantined IDs absent from controller train: {sorted(unknown)}")
+    effective = [sid for sid in original_ids if sid not in quarantined]
+    if quarantined & set(effective):
+        raise AssertionError("quarantined sample entered effective controller train")
+    return effective
+
+
+def filter_quarantined_records(records, quarantine_file):
+    """Central record-level filter used by every controller training/label path."""
+    payload = load_quarantine(quarantine_file)
+    quarantined = {str(entry["sample_id"]) for entry in payload["entries"]}
+    filtered = [record for record in records if sample_id(record[0]) not in quarantined]
+    if quarantined & {sample_id(record[0]) for record in filtered}:
+        raise AssertionError("quarantined sample survived central filtering")
+    return filtered
+
+
+def quarantine_fraction(original_count, quarantine_count):
+    if original_count <= 0 or not 0 <= quarantine_count <= original_count:
+        raise ValueError("invalid quarantine counts")
+    return quarantine_count / original_count
+
+
+def validate_complete_manifest(manifest):
+    if manifest.get("completion_status") != "complete":
+        raise ValueError("controller cache is incomplete")
+    missing = REQUIRED_COMPLETE_MANIFEST_FIELDS - set(manifest)
+    if missing:
+        raise ValueError(f"controller cache manifest missing required fields: {sorted(missing)}")
+    return True
 
 
 def normalized_question(question):
@@ -162,6 +247,11 @@ class ControllerFeatureWriter:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.hidden_size = hidden_size
+        (self.output_dir / "manifest.json").write_text(json.dumps({
+            "format": FORMAT,
+            "completion_status": "in_progress",
+            "hidden_size": hidden_size,
+        }, indent=2, sort_keys=True) + "\n")
         self.query_stream = (self.output_dir / "query_embeddings.bf16").open("wb")
         self.packet_stream = (self.output_dir / "packet_embeddings.bf16").open("wb")
         self.record_stream = (self.output_dir / "records.jsonl").open("w")
@@ -199,6 +289,7 @@ class ControllerFeatureWriter:
         self.record_stream.close()
         manifest = {
             "format": FORMAT,
+            "completion_status": "complete",
             "hidden_size": self.hidden_size,
             "dtype": "bfloat16",
             "num_queries": self.num_queries,
@@ -221,6 +312,7 @@ class ControllerFeatureCache:
         self.manifest = json.loads((self.cache_dir / "manifest.json").read_text())
         if self.manifest["format"] != FORMAT:
             raise ValueError("unsupported controller feature cache format")
+        validate_complete_manifest(self.manifest)
         self.hidden_size = self.manifest["hidden_size"]
         self.records = [json.loads(line) for line in
                         (self.cache_dir / "records.jsonl").read_text().splitlines()]
