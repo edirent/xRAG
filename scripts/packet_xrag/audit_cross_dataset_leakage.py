@@ -10,7 +10,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path: sys.path.insert(0, str(REPO_ROOT))
 
 from src.packet_xrag.data import MusiqueAdapter, TriviaQAAdapter, TwoWikiAdapter
-from src.packet_xrag.generalization.protocol import assert_inference_view
+from src.packet_xrag.generalization.protocol import (
+    assert_inference_view, register_checkpoint_owner,
+)
 
 
 ADAPTERS = {"2wiki": TwoWikiAdapter, "musique": MusiqueAdapter,
@@ -48,9 +50,7 @@ def main(argv=None):
         selection = dataset_root / "fuser/run_1_hotpot_init/selection.json"
         if selection.exists():
             payload = json.loads(selection.read_text()); digest = payload["best_checkpoint_sha256"]
-            if digest in checkpoint_hashes:
-                raise RuntimeError(f"dataset checkpoint reused across {checkpoint_hashes[digest]} and {dataset}")
-            checkpoint_hashes[digest] = dataset
+            register_checkpoint_owner(checkpoint_hashes, digest, dataset)
         results[dataset] = {"split_overlap": "PASS", "inference_label_stripping": "PASS",
                             "feature_provenance": feature_status}
     report = {"status": "PASS", "datasets": results,

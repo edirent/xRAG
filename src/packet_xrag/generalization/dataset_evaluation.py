@@ -66,7 +66,7 @@ def summarize(rows):
 
 @torch.inference_mode()
 def evaluate_independent(configuration, records, groups, k2, tokenizer, generator,
-                         xrag_id, device, batch_size=8):
+                         xrag_id, device, batch_size=8, tokens_per_packet=2):
     rows, buckets = [], defaultdict(list)
     for record, selected in zip(records, groups): buckets[len(selected)].append((record, selected))
     for count, items in sorted(buckets.items()):
@@ -75,9 +75,9 @@ def evaluate_independent(configuration, records, groups, k2, tokenizer, generato
             batch = items[start:start + batch_size]; torch.cuda.reset_peak_memory_stats(device)
             began = time.time()
             projected = torch.stack([k2(record["packet_embeddings"][selected].to(
-                device=device, dtype=torch.bfloat16)).reshape(2 * count, 4096)
+                device=device, dtype=torch.bfloat16)).reshape(tokens_per_packet * count, 4096)
                 for record, selected in batch])
-            prompts = tokenizer([v1.build_prompt(record["question"], 2 * count)
+            prompts = tokenizer([v1.build_prompt(record["question"], tokens_per_packet * count)
                                  for record, _ in batch], return_tensors="pt",
                                 add_special_tokens=False, padding=True).to(device)
             generated = greedy_generate_fused(generator, tokenizer, prompts.input_ids,
@@ -85,14 +85,15 @@ def evaluate_independent(configuration, records, groups, k2, tokenizer, generato
             torch.cuda.synchronize(device); elapsed = 1000 * (time.time() - began) / len(batch)
             peak = torch.cuda.max_memory_allocated(device) / 1024**3
             rows.extend(decode_row(record, selected, generated[index], tokenizer, configuration,
-                2 * count, 2 * count, 2 * count, 0.0, elapsed, peak)
+                tokens_per_packet * count, tokens_per_packet * count,
+                tokens_per_packet * count, 0.0, elapsed, peak)
                 for index, (record, selected) in enumerate(batch))
     return rows
 
 
 @torch.inference_mode()
 def evaluate_fuser(configuration, fuser, records, groups, make_fused, k2, tokenizer,
-                   generator, xrag_id, device, batch_size=8):
+                   generator, xrag_id, device, batch_size=8, tokens_per_packet=2):
     rows = []
     for start in range(0, len(records), batch_size):
         batch = records[start:start + batch_size]; selected = groups[start:start + batch_size]
@@ -106,7 +107,7 @@ def evaluate_fuser(configuration, fuser, records, groups, make_fused, k2, tokeni
         torch.cuda.synchronize(device); total_ms = 1000 * (time.time() - began) / len(batch)
         peak = torch.cuda.max_memory_allocated(device) / 1024**3
         rows.extend(decode_row(record, group, generated[index], tokenizer, configuration,
-            2 * len(group), 4, 4, fuser_ms, total_ms, peak)
+            tokens_per_packet * len(group), 4, 4, fuser_ms, total_ms, peak)
             for index, (record, group) in enumerate(zip(batch, selected)))
     return rows
 

@@ -20,6 +20,7 @@ from src.packet_xrag.generalization.dataset_evaluation import (
     evaluate_fuser, evaluate_independent, make_c1_fused, summarize,
 )
 from src.packet_xrag.generalization.dataset_gates import shadow_gate
+from src.packet_xrag.generalization.protocol import load_checkpoint_state
 
 
 def main(argv=None):
@@ -49,7 +50,8 @@ def main(argv=None):
         for record in records}
     tokenizer, generator, xrag_id, config = load_frozen_generator(device)
     k2 = load_frozen_k2_projector(config, device); fuser = build_fuser("C1").to(device)
-    payload = torch.load(selection["best_checkpoint"], map_location="cpu", weights_only=True)
+    payload = load_checkpoint_state(selection["best_checkpoint"],
+                                    selection["best_checkpoint_sha256"])
     fuser.load_state_dict(payload["state_dict"], strict=True); fuser.eval()
     metrics, all_rows = {}, []
     for breadth, label in ((2, "STATIC_2"), (6, "INDEPENDENT_STATIC_6"),

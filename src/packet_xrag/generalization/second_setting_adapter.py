@@ -2,13 +2,40 @@
 
 from __future__ import annotations
 
+import hashlib
+from pathlib import Path
+
 import torch
+
+from src.model.xMistral.modeling_xmistral import Projector
+from src.packet_xrag.encoding.multi_token_projector import MultiTokenPacketProjector
 
 
 OUTPUT_M = 4
 TOKENS_PER_PACKET = 4
 BASE_PACKETS = 2
 BASE_REDUCTION = "slotwise mean of STATIC rank-1 and rank-2 K4 tokens"
+K4_CHECKPOINT = Path("cache/projector/multi_token_k4/best_short_f1/multi_token_projector.pt")
+K4_SHA256 = "971df4f4c516dc8945b2a5e2ba9f80f69279ac3cc0691635beeff9e21498c7d4"
+V1_CHECKPOINT = Path("cache/projector/packet_projector_calibration/last/projector.pt")
+
+
+def load_frozen_k4_projector(config, device, v1_path=V1_CHECKPOINT,
+                             k4_path=K4_CHECKPOINT):
+    """Load the preregistered compatible K4 asset and keep it strictly frozen."""
+    v1_path, k4_path = Path(v1_path), Path(k4_path)
+    if hashlib.sha256(k4_path.read_bytes()).hexdigest() != K4_SHA256:
+        raise RuntimeError("frozen K4 checkpoint hash mismatch")
+    base = Projector(config)
+    base.load_state_dict(torch.load(v1_path, map_location="cpu", weights_only=True), strict=True)
+    projector = MultiTokenPacketProjector(base, config.retriever_hidden_size,
+                                           config.hidden_size, TOKENS_PER_PACKET, 1024)
+    projector.load_state_dict(torch.load(k4_path, map_location="cpu", weights_only=True),
+                              strict=True)
+    projector.to(device=device, dtype=torch.bfloat16).eval()
+    for parameter in projector.parameters():
+        parameter.requires_grad = False
+    return projector
 
 
 def k4_residual_inputs(projected_groups, device):

@@ -7,6 +7,8 @@ import json
 import random
 from pathlib import Path
 
+import torch
+
 from src.packet_xrag.data.base_qa_adapter import normalized_question, stable_hash
 
 
@@ -89,3 +91,22 @@ def assert_manifest_immutable(path, expected_hash):
     if hashlib.sha256(path.read_bytes()).hexdigest() != expected_hash:
         raise RuntimeError("frozen evaluation manifest changed")
     return True
+
+
+def load_checkpoint_state(path, expected_hash):
+    """Hash-check and load a frozen fuser payload for strict caller-side loading."""
+    path = Path(path)
+    if hashlib.sha256(path.read_bytes()).hexdigest() != expected_hash:
+        raise RuntimeError("frozen checkpoint hash mismatch")
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    if not isinstance(payload, dict) or not isinstance(payload.get("state_dict"), dict):
+        raise RuntimeError("frozen checkpoint has no state_dict")
+    return payload
+
+
+def register_checkpoint_owner(owners, digest, owner):
+    """Reject accidental reuse of one trained checkpoint across dataset owners."""
+    if digest in owners and owners[digest] != owner:
+        raise RuntimeError(f"checkpoint reused across {owners[digest]} and {owner}")
+    owners[digest] = owner
+    return owners

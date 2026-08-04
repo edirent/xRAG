@@ -20,6 +20,7 @@ from src.packet_xrag.generalization.dataset_evaluation import (
     evaluate_fuser, evaluate_independent, evaluate_no_context, evaluate_text,
     make_c1_fused, summarize,
 )
+from src.packet_xrag.generalization.protocol import load_checkpoint_state
 
 
 HOTPOT_FUSER = Path("cache/composition/full/C1_O1/epoch_6.pt")
@@ -65,7 +66,7 @@ def main(argv=None):
     tokenizer, generator, xrag_id, config = load_frozen_generator(device)
     k2 = load_frozen_k2_projector(config, device)
     fuser = build_fuser("C1").to(device)
-    payload = torch.load(HOTPOT_FUSER, map_location="cpu", weights_only=True)
+    payload = load_checkpoint_state(HOTPOT_FUSER, HOTPOT_FUSER_SHA256)
     fuser.load_state_dict(payload["state_dict"], strict=True); fuser.eval()
     rows_by_config = {}
     def add(name, rows):
