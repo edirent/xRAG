@@ -20,6 +20,7 @@ def main():
     shadow = json.loads((root / "shadow/results.json").read_text())
     benchmark = json.loads((root / "benchmark/results.json").read_text())
     bootstrap = json.loads((root / "benchmark/bootstrap.json").read_text())
+    ablations = json.loads((root / "ablations/results.json").read_text())
     candidate = json.loads((root / "frozen_candidate/candidate_config.json").read_text())
     checkpoint = json.loads((root / "full/C1_O1/selection.json").read_text())
     split_hashes = {}
@@ -64,6 +65,7 @@ def main():
             "fuser_n6": sm["FUSER_N6"]["short_f1"], "gates": shadow["gates"],
             "bootstrap": shadow["paired_bootstrap_fuser_vs_static2"]},
         "benchmark": benchmark["metrics"], "bootstrap": bootstrap,
+        "candidate_ablations": ablations,
         "selected_final_gate": bootstrap["selected_final_gate"],
         "scientific_conclusion": "The composition gap is supported. Residual fixed-M fusion preserves STATIC2 quality while preventing duplicate, distractor, N12, and ALL collapse; arbitrary order remains a failure mode.",
         "composition_gap_supported": True, "joint_composition_successful": True,
@@ -114,6 +116,12 @@ def main():
         f"- XRAG_ORACLE / independent ALL / fuser ALL: {f(bm['XRAG_ORACLE']['short_f1'])} / {f(bm['ALL']['short_f1'])} / {f(bm['FUSER_ALL']['short_f1'])}",
         f"- Input packets / output tokens: {f(bm['FUSER_N6']['input_packets'])} / {f(bm['FUSER_N6']['output_fused_tokens'])}",
         f"- Robustness reductions: {bootstrap['robustness_reductions']}", "",
+        "## Required candidate ablations", "",
+        f"- Frozen reference STATIC-N6 fuser: {f(ablations['reference_static_query_residual_n6']['short_f1'])}",
+        *[f"- {name}: {f(value['short_f1'])} (delta {f(ablations['deltas_vs_reference'][name])})"
+          for name, value in ablations["metrics"].items()],
+        "- O1 vs O1+O3+O4, fixed-M vs 2P, residual vs direct fusion, and N2/N4/N6/N12/ALL are recorded in the full DEV/probe suite.",
+        f"- Benchmark stress implementation audit: {benchmark.get('implementation_audit', {})}", "",
         f"## Selected final Gate: {bootstrap['selected_final_gate']}", "",
         report["scientific_conclusion"], "",
         "- Composition-gap supported: Yes", "- Joint composition successful: Yes",
