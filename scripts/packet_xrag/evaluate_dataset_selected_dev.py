@@ -16,7 +16,9 @@ from scripts.packet_xrag.composition_training_common import (
 )
 from scripts.packet_xrag.utility_predictor_training_common import load_static_score_cache
 from src.packet_xrag.controller.feature_cache import ControllerFeatureCache, sha256_file
-from src.packet_xrag.generalization.dataset_evaluation import evaluate_fuser, summarize
+from src.packet_xrag.generalization.dataset_evaluation import (
+    evaluate_fuser, make_c1_fused, summarize,
+)
 
 
 def main(argv=None):
@@ -30,8 +32,8 @@ def main(argv=None):
     if output.exists(): raise RuntimeError("refusing to overwrite selected DEV suite")
     ledger_path = root / "experiment_ledger.json"; ledger = json.loads(ledger_path.read_text())
     usage = ledger["datasets"][args.dataset]
-    if usage["dev_generation"] != 4:
-        raise RuntimeError("selected DEV must follow baseline plus three checkpoint suites")
+    if usage["dev_generation"] > 5:
+        raise RuntimeError("no DEV generation budget remains for selected suite")
     selection = json.loads((dataset_root / "fuser/run_1_hotpot_init/selection.json").read_text())
     if selection["optimization_failure"]:
         raise RuntimeError("run-1 optimization failure requires the authorized run-2 path")
@@ -56,13 +58,13 @@ def main(argv=None):
         groups = [rankings[record["sample_id"]][:
             record["packet_count"] if breadth is None else breadth] for record in records]
         rows = evaluate_fuser(f"DATASET_FUSER_{label}", fuser, records, groups,
-            make_fused_tokens, k2, tokenizer, generator, xrag_id, device, args.batch_size)
+            make_c1_fused, k2, tokenizer, generator, xrag_id, device, args.batch_size)
         metrics[f"DATASET_FUSER_{label}"] = summarize(rows); all_rows.extend(rows)
         print(json.dumps({f"DATASET_FUSER_{label}": summarize(rows)}), flush=True)
     baseline = json.loads((dataset_root / "dev_baselines/results.json").read_text())["metrics"]
     combined = {**baseline, **metrics}
     report = {"status": "complete", "dataset": args.dataset, "split": "DEV",
-        "evaluation_suite_number": 5, "metrics": combined,
+        "evaluation_suite_number": usage["dev_generation"] + 1, "metrics": combined,
         "selected_epoch": selection["best_epoch"],
         "checkpoint_sha256": selection["best_checkpoint_sha256"],
         "breadth_degradation_n6_to_n12": metrics["DATASET_FUSER_6"]["short_f1"] -
@@ -72,7 +74,7 @@ def main(argv=None):
     (output / "results.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     with (output / "predictions.jsonl").open("w") as stream:
         for row in all_rows: stream.write(json.dumps(row, ensure_ascii=False) + "\n")
-    usage["dev_generation"] = 5
+    usage["dev_generation"] += 1
     usage["selected_checkpoint_sha256"] = selection["best_checkpoint_sha256"]
     ledger_path.write_text(json.dumps(ledger, indent=2, sort_keys=True) + "\n")
     print(json.dumps(report, indent=2), flush=True)

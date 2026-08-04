@@ -10,6 +10,7 @@ import torch
 
 from scripts.packet_xrag import run_selector_calibration as selector
 from scripts.packet_xrag import train_packet_projector as v1
+from scripts.packet_xrag.composition_training_common import make_fused_tokens
 from src.packet_xrag.composition.fused_xrag_injection import greedy_generate_fused
 
 
@@ -17,6 +18,11 @@ def answer_scores(prediction, record):
     scores = [selector.score_prediction(prediction, answer)
               for answer in record.get("answers", [record["answer"]])]
     return max(value[0] for value in scores), max(value[1] for value in scores)
+
+
+def make_c1_fused(fuser, records, selected, k2, device):
+    """Adapt the branch-aware shared builder to the dataset evaluator callback."""
+    return make_fused_tokens(fuser, "C1", records, selected, k2, device)
 
 
 def decode_row(record, selected, generated, tokenizer, configuration, input_tokens,
@@ -150,4 +156,3 @@ def evaluate_no_context(records, tokenizer, generator, device, batch_size=8):
         rows.extend(decode_row(record, [], generated[index], tokenizer, "NO_CONTEXT",
             0, 0, 0, 0.0, elapsed, peak) for index, record in enumerate(batch))
     return rows
-

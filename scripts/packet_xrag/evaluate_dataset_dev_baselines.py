@@ -17,7 +17,8 @@ from scripts.packet_xrag.composition_training_common import (
 from scripts.packet_xrag.utility_predictor_training_common import load_static_score_cache
 from src.packet_xrag.controller.feature_cache import ControllerFeatureCache, sha256_file
 from src.packet_xrag.generalization.dataset_evaluation import (
-    evaluate_fuser, evaluate_independent, evaluate_no_context, evaluate_text, summarize,
+    evaluate_fuser, evaluate_independent, evaluate_no_context, evaluate_text,
+    make_c1_fused, summarize,
 )
 
 
@@ -41,7 +42,12 @@ def main(argv=None):
     if output.exists(): raise RuntimeError("refusing to overwrite DEV baseline suite")
     ledger_path = root / "experiment_ledger.json"; ledger = json.loads(ledger_path.read_text())
     usage = ledger["datasets"][args.dataset]
-    if usage["dev_generation"] != 0: raise RuntimeError("DEV baseline suite must run first")
+    recovery = dataset_root / "dev_baselines_failure_1.json"
+    if usage["dev_generation"] not in (0, 1):
+        raise RuntimeError("DEV baseline suite budget/order mismatch")
+    if usage["dev_generation"] == 1 and not recovery.exists():
+        raise RuntimeError("DEV recovery requires a recorded incomplete first suite")
+    suite_number = usage["dev_generation"] + 1
     if sha256_file(HOTPOT_FUSER) != HOTPOT_FUSER_SHA256:
         raise RuntimeError("frozen Hotpot fuser hash mismatch")
     static_selection = json.loads((dataset_root / "static/selection.json").read_text())
@@ -85,11 +91,11 @@ def main(argv=None):
                                         xrag_id, device, args.batch_size))
     groups = [clipped(static[record["sample_id"]], record, 6) for record in records]
     add("HOTPOT_ZERO_SHOT_FUSER_6", evaluate_fuser("HOTPOT_ZERO_SHOT_FUSER_6", fuser,
-        records, groups, make_fused_tokens, k2, tokenizer, generator, xrag_id, device,
+        records, groups, make_c1_fused, k2, tokenizer, generator, xrag_id, device,
         args.batch_size))
     metrics = {name: summarize(rows) for name, rows in rows_by_config.items()}
     report = {"status": "complete", "dataset": args.dataset, "split": "DEV",
-        "evaluation_suite_number": 1, "metrics": metrics,
+        "evaluation_suite_number": suite_number, "metrics": metrics,
         "hotpot_fuser_checkpoint_sha256": HOTPOT_FUSER_SHA256,
         "dataset_static_checkpoint_sha256": static_selection["checkpoint_sha256"],
         "all_max_packets": 48, "benchmark_accessed": False, "final100_accessed": False}
@@ -98,7 +104,7 @@ def main(argv=None):
     with (output / "predictions.jsonl").open("w") as stream:
         for name in rows_by_config:
             for row in rows_by_config[name]: stream.write(json.dumps(row, ensure_ascii=False) + "\n")
-    usage["dev_generation"] = 1
+    usage["dev_generation"] = suite_number
     ledger_path.write_text(json.dumps(ledger, indent=2, sort_keys=True) + "\n")
     print(json.dumps(report, indent=2), flush=True)
 

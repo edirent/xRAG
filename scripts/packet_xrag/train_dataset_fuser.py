@@ -28,7 +28,7 @@ from src.packet_xrag.composition.fused_xrag_injection import (
 )
 from src.packet_xrag.controller.feature_cache import ControllerFeatureCache, sha256_file
 from src.packet_xrag.generalization.dataset_evaluation import (
-    evaluate_fuser, summarize,
+    evaluate_fuser, make_c1_fused, summarize,
 )
 from src.packet_xrag.generalization.protocol import SEED
 
@@ -57,8 +57,10 @@ def main(argv=None):
     ledger_path = root / "experiment_ledger.json"; ledger = json.loads(ledger_path.read_text())
     usage = ledger["datasets"][args.dataset]
     if usage["fuser_full_runs"] != 0: raise RuntimeError("first fuser run already consumed")
-    if usage["dev_generation"] != 1:
+    if not (dataset_root / "dev_baselines/results.json").exists() or usage["dev_generation"] > 3:
         raise RuntimeError("frozen DEV baselines and zero-shot evaluation must precede training")
+    if usage["dev_generation"] + len(EVALUATION_EPOCHS) > 5:
+        raise RuntimeError("three checkpoint suites would leave no selected-DEV budget")
     if sha256_file(HOTPOT_FUSER) != HOTPOT_FUSER_SHA256:
         raise RuntimeError("frozen Hotpot initialization hash mismatch")
     static = json.loads((dataset_root / "static/selection.json").read_text())
@@ -120,7 +122,7 @@ def main(argv=None):
             for breadth in (2, 6):
                 groups = [dev_rankings[record["sample_id"]][:breadth] for record in dev_records]
                 rows = evaluate_fuser(f"DATASET_FUSER_{breadth}", fuser, dev_records, groups,
-                    make_fused_tokens, k2, tokenizer, generator, xrag_id, device, 8)
+                    make_c1_fused, k2, tokenizer, generator, xrag_id, device, 8)
                 by_breadth[str(breadth)] = summarize(rows)
                 predictions = output / f"dev_epoch_{epoch}_n{breadth}.jsonl"
                 with predictions.open("w") as stream:

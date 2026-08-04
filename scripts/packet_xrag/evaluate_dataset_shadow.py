@@ -17,7 +17,7 @@ from scripts.packet_xrag.composition_training_common import (
 from scripts.packet_xrag.utility_predictor_training_common import load_static_score_cache
 from src.packet_xrag.controller.feature_cache import ControllerFeatureCache, sha256_file
 from src.packet_xrag.generalization.dataset_evaluation import (
-    evaluate_fuser, evaluate_independent, summarize,
+    evaluate_fuser, evaluate_independent, make_c1_fused, summarize,
 )
 from src.packet_xrag.generalization.dataset_gates import shadow_gate
 
@@ -33,7 +33,7 @@ def main(argv=None):
     if output.exists(): raise RuntimeError("refusing to overwrite SHADOW suite")
     ledger_path = root / "experiment_ledger.json"; ledger = json.loads(ledger_path.read_text())
     usage = ledger["datasets"][args.dataset]
-    if usage["shadow"] != 0 or usage["dev_generation"] != 5:
+    if usage["shadow"] != 0 or not (dataset_root / "dev_selected/results.json").exists():
         raise RuntimeError("SHADOW lock/order is not pristine")
     selection = json.loads((dataset_root / "fuser/run_1_hotpot_init/selection.json").read_text())
     if sha256_file(selection["best_checkpoint"]) != selection["best_checkpoint_sha256"]:
@@ -62,7 +62,7 @@ def main(argv=None):
     for breadth in (6, 12):
         label = f"DATASET_FUSER_{breadth}"
         groups = [rankings[record["sample_id"]][:breadth] for record in records]
-        rows = evaluate_fuser(label, fuser, records, groups, make_fused_tokens, k2,
+        rows = evaluate_fuser(label, fuser, records, groups, make_c1_fused, k2,
             tokenizer, generator, xrag_id, device, args.batch_size)
         metrics[label] = summarize(rows); all_rows.extend(rows)
         print(json.dumps({label: metrics[label]}), flush=True)
