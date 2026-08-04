@@ -20,12 +20,16 @@ class ResidualSetFuser(nn.Module):
     def forward(self, query_embeddings, base_tokens, extra_packet_tokens, extra_mask):
         if base_tokens.shape[1:] != (self.output_slots, query_embeddings.shape[-1]):
             raise ValueError("base tokens must be STATIC-2's four K2 tokens")
-        if extra_packet_tokens.shape[1] == 0 or not bool(extra_mask.any()):
+        valid = extra_mask.any(dim=1) if extra_mask.shape[1] else torch.zeros(
+            base_tokens.shape[0], device=base_tokens.device, dtype=torch.bool)
+        if not bool(valid.any()):
             alpha = torch.zeros(base_tokens.shape[0], device=base_tokens.device,
                                 dtype=base_tokens.dtype)
             return base_tokens, alpha
-        residual = self.residual_fuser(query_embeddings, extra_packet_tokens, extra_mask)
+        residual = torch.zeros_like(base_tokens)
+        residual[valid] = self.residual_fuser(query_embeddings[valid],
+            extra_packet_tokens[valid], extra_mask[valid])
         alpha = torch.tanh(self.gate(query_embeddings)).squeeze(-1)
+        alpha = alpha * valid.to(alpha.dtype)
         # The effective residual is exactly zero at initialization because alpha=0.
         return base_tokens + alpha[:, None, None] * residual, alpha
-
