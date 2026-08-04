@@ -4,6 +4,7 @@ from src.packet_xrag.controller.autonomous_search import (
     FORBIDDEN_INFERENCE_KEYS, assert_no_inference_leakage, assert_only_search_dev,
     fixed_probe_subset, split_search_ids,
 )
+from src.packet_xrag.controller.autonomous_features import sanitize_provisional_answer
 
 
 def test_search_split_is_deterministic_disjoint_and_locked_size():
@@ -30,3 +31,8 @@ def test_gold_derived_inference_keys_are_rejected(key):
 
 def test_provisional_answer_is_allowed():
     assert assert_no_inference_leakage({"provisional_answer": "Paris", "entropy": 0.2})
+
+
+def test_generated_control_tokens_are_sanitized_before_intervention_scoring():
+    assert sanitize_provisional_answer("Luis <xRAG> Airport") == "Luis Airport"
+    assert sanitize_provisional_answer("<pad>") == "unknown"
