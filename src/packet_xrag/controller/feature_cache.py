@@ -269,6 +269,8 @@ class ControllerFeatureWriter:
             "sample_id": sample_id(sample),
             "question": sample["question"],
             "answer": sample["answer"],
+            "answers": sample.get("answers", [sample["answer"]]),
+            "metadata": sample.get("metadata", {}),
             "query_index": self.num_queries,
             "packet_offset": packet_offset,
             "packet_count": len(packets),

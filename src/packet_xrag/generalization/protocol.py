@@ -43,8 +43,8 @@ def split_audit(named_samples):
     for name, samples in named_samples.items():
         ids = [str(sample["id"]) for sample in samples]
         questions = [sample["question"] for sample in samples]
-        documents = {str(document["document_id"]) for sample in samples
-                     for document in sample["documents"]}
+        documents = {stable_hash(str(document.get("title", document["document_id"])).casefold())
+                     for sample in samples for document in sample["documents"]}
         answers = {answer.casefold() for sample in samples for answer in sample["answers"]}
         views[name] = {"ids": set(ids), "exact": {stable_hash(value) for value in questions},
                        "normalized": {stable_hash(normalized_question(value)) for value in questions},
@@ -89,4 +89,3 @@ def assert_manifest_immutable(path, expected_hash):
     if hashlib.sha256(path.read_bytes()).hexdigest() != expected_hash:
         raise RuntimeError("frozen evaluation manifest changed")
     return True
-

@@ -10,10 +10,19 @@ class MusiqueAdapter(PacketQADatasetAdapter):
     source_identifier = "bdsaglam/musique"
 
     def load_train(self):
-        return load_dataset(self.source_identifier, split="train")
+        return self._load_answerable("train")
 
     def load_validation(self):
-        return load_dataset(self.source_identifier, split="validation")
+        return self._load_answerable("validation")
+
+    def _load_answerable(self, split):
+        # This mirror concatenates the answerable and unanswerable variants under
+        # the same IDs.  The protocol freezes the original answerable task only.
+        return load_dataset(self.source_identifier, split=split).filter(
+            lambda sample: bool(sample["answerable"]),
+            load_from_cache_file=True,
+            desc=f"Selecting MuSiQue answerable {split}",
+        )
 
     def canonicalize(self, sample):
         documents = []
@@ -33,4 +42,3 @@ class MusiqueAdapter(PacketQADatasetAdapter):
                 "support_annotations": [p["idx"] for p in sample["paragraphs"]
                                         if p["is_supporting"]],
                 "metadata": {"hop_count": hop_count, "answerable": sample.get("answerable", True)}}
-

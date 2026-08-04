@@ -34,6 +34,21 @@ def test_musique_paragraph_packetization_is_stable():
     assert all(packet["is_support"] for packet in packets)
 
 
+def test_musique_source_is_explicitly_answerable_only(monkeypatch):
+    class FakeDataset(list):
+        def filter(self, predicate, **kwargs):
+            assert kwargs["load_from_cache_file"] is True
+            return FakeDataset(item for item in self if predicate(item))
+
+    monkeypatch.setattr("src.packet_xrag.data.musique_adapter.load_dataset",
+                        lambda *args, **kwargs: FakeDataset([
+                            {"id": "same", "answerable": False},
+                            {"id": "same", "answerable": True},
+                        ]))
+    selected = MusiqueAdapter().load_train()
+    assert len(selected) == 1 and selected[0]["answerable"] is True
+
+
 def test_inference_packet_serialization_removes_supervision():
     adapter = TwoWikiAdapter()
     packets = [{"packet_text": "[T] x", "is_support": True,
