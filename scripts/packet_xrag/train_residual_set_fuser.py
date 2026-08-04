@@ -11,4 +11,9 @@ from scripts.packet_xrag.train_set_fuser import main
 
 
 if __name__ == "__main__":
-    main(["--branch", "C1", *sys.argv[1:]])
+    if "--full" in sys.argv:
+        sys.argv.remove("--full")
+        from scripts.packet_xrag.train_full_composition import main as full_main
+        full_main(sys.argv[1:])
+    else:
+        main(["--branch", "C1", *sys.argv[1:]])
