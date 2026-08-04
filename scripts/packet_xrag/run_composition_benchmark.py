@@ -35,15 +35,16 @@ def benchmark_stresses(records, rankings):
         output["REVERSE"].append(list(reversed(selected)))
         permuted = list(selected); random.Random(f"{SEED}:{record['sample_id']}:benchmark").shuffle(permuted)
         output["RANDOM"].append(permuted)
-        gold_target = next((index for index in selected if index in gold), record["gold_packet_ids"][0])
-        output["GOLD_DUPLICATE_X2"].append(selected + [gold_target, gold_target])
-        nongold_target = next((index for index in rankings[record["sample_id"]] if index not in gold),
-                              selected[-1])
-        output["NONGOLD_DUPLICATE_X2"].append(selected + [nongold_target, nongold_target])
+        gold_target = next((index for index in selected if index in gold), None)
+        output["GOLD_DUPLICATE_X2"].append(
+            selected if gold_target is None else selected + [gold_target, gold_target])
+        nongold_target = next((index for index in selected if index not in gold), None)
+        output["NONGOLD_DUPLICATE_X2"].append(
+            selected if nongold_target is None else selected + [nongold_target, nongold_target])
         distractors = [index for index in rankings[record["sample_id"]]
                        if index not in gold and index not in selected]
         if not distractors:
-            distractors = [nongold_target]
+            distractors = [selected[-1] if nongold_target is None else nongold_target]
         output["DISTRACTOR_X4"].append(selected + [distractors[index % len(distractors)]
                                                     for index in range(4)])
     return output
