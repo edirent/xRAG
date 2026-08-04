@@ -68,6 +68,16 @@ def selected_ids(record, static_ranking, branch_id, breadth):
     return list(ranking[:min(breadth, len(ranking))])
 
 
+def static2_k2_base(tokens):
+    """Return four base tokens, deterministically replicating a singleton packet."""
+    if tokens.ndim != 3 or tokens.shape[1:] != (2, 4096) or tokens.shape[0] < 1:
+        raise ValueError("STATIC2 K2 base requires at least one [2,4096] packet")
+    selected = tokens[:2]
+    if selected.shape[0] == 1:
+        selected = selected.repeat(2, 1, 1)
+    return selected.reshape(4, 4096)
+
+
 @torch.no_grad()
 def make_fused_tokens(fuser, branch_id, records, selected_groups, k2_projector, device):
     query = torch.stack([record["query_embedding"] for record in records]).to(
@@ -86,7 +96,7 @@ def make_fused_tokens(fuser, branch_id, records, selected_groups, k2_projector, 
             device=device, dtype=torch.bfloat16)).float()
         projected_groups.append(projected)
     if branch_id == "C1":
-        base = torch.stack([tokens[:2].reshape(4, 4096) for tokens in projected_groups])
+        base = torch.stack([static2_k2_base(tokens) for tokens in projected_groups])
         extra_count = max(max(0, len(selected) - 2) for selected in selected_groups)
         if extra_count == 0:
             return fuser(query, base, torch.empty(len(records), 0, 2, 4096, device=device),
@@ -108,4 +118,3 @@ def checkpoint_payload(branch_id, fuser, extra=None):
             "latent_dim": 512, "depth": 1, "heads": 8, "seed": SEED,
             "state_dict": {key: value.detach().cpu() for key, value in fuser.state_dict().items()},
             **(extra or {})}
-
