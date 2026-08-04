@@ -10,10 +10,24 @@ class TriviaQAAdapter(PacketQADatasetAdapter):
     source_identifier = "mandarjoshi/trivia_qa:rc"
 
     def load_train(self):
-        return load_dataset("mandarjoshi/trivia_qa", "rc", split="train")
+        return self._load_unique("train")
 
     def load_validation(self):
-        return load_dataset("mandarjoshi/trivia_qa", "rc", split="validation")
+        return self._load_unique("validation")
+
+    def _load_unique(self, split):
+        dataset = load_dataset("mandarjoshi/trivia_qa", "rc", split=split)
+        # The RC configuration contains two evidence variants for many question
+        # IDs. Freeze the richer supplied-evidence variant without using answers.
+        best = {}
+        for index, sample in enumerate(dataset):
+            contexts = [*sample["entity_pages"]["wiki_context"],
+                        *sample["search_results"]["search_context"]]
+            score = (sum(bool(str(value).strip()) for value in contexts),
+                     sum(len(str(value)) for value in contexts), -index)
+            sid = str(sample["question_id"])
+            if sid not in best or score > best[sid][0]: best[sid] = (score, index)
+        return dataset.select(sorted(value[1] for value in best.values()))
 
     def canonicalize(self, sample):
         documents = []
@@ -30,4 +44,3 @@ class TriviaQAAdapter(PacketQADatasetAdapter):
                 "answer": sample["answer"]["value"], "answers": answers,
                 "documents": documents, "support_annotations": [],
                 "metadata": {"question_source": sample.get("question_source", "")}}
-

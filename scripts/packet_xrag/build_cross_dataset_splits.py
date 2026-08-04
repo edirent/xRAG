@@ -11,6 +11,7 @@ if str(REPO_ROOT) not in sys.path: sys.path.insert(0, str(REPO_ROOT))
 
 from src.packet_xrag.data import MusiqueAdapter, TriviaQAAdapter, TwoWikiAdapter
 from src.packet_xrag.data.base_qa_adapter import MAX_PACKETS
+from src.packet_xrag.data.base_qa_adapter import normalized_question
 from src.packet_xrag.generalization.protocol import (
     SEED, deterministic_partition, ordered_hash, split_audit,
 )
@@ -25,6 +26,18 @@ def id_of(adapter, sample):
     return str(sample["question_id"])
 
 
+def unique_questions(source, forbidden=None):
+    seen = set(forbidden or ()); keep = []
+    questions = source["question"] if hasattr(source, "column_names") else [
+        sample["question"] for sample in source]
+    for index, question in enumerate(questions):
+        key = normalized_question(question)
+        if key in seen: continue
+        seen.add(key); keep.append(index)
+    selected = source.select(keep) if hasattr(source, "select") else [source[i] for i in keep]
+    return selected, seen
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", choices=tuple(ADAPTERS), required=True)
@@ -33,6 +46,9 @@ def main(argv=None):
     if root.exists(): raise RuntimeError(f"refusing to overwrite {args.dataset} split")
     adapter = ADAPTERS[args.dataset](); train_source = adapter.load_train()
     validation_source = adapter.load_validation()
+    if args.dataset == "triviaqa":
+        train_source, train_questions = unique_questions(train_source)
+        validation_source, _ = unique_questions(validation_source, train_questions)
     train_ids = [id_of(adapter, sample) for sample in train_source]
     validation_ids = [id_of(adapter, sample) for sample in validation_source]
     partitions = deterministic_partition(train_ids, validation_ids)

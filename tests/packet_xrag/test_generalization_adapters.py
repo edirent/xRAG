@@ -4,6 +4,7 @@ from src.packet_xrag.data.base_qa_adapter import (
     PacketQADatasetAdapter, normalize_answer_alias,
 )
 from src.packet_xrag.data.musique_adapter import MusiqueAdapter
+from src.packet_xrag.data.triviaqa_adapter import TriviaQAAdapter
 from src.packet_xrag.data.twowiki_adapter import TwoWikiAdapter
 
 
@@ -55,3 +56,19 @@ def test_inference_packet_serialization_removes_supervision():
                 "is_supporting": True, "contains_answer": True}]
     view = adapter.inference_packets(packets)[0]
     assert view == {"packet_text": "[T] x"}
+
+
+def test_triviaqa_duplicate_question_prefers_richer_evidence(monkeypatch):
+    class FakeDataset(list):
+        def select(self, indices): return FakeDataset(self[index] for index in indices)
+    def row(question_id, search):
+        return {"question_id": question_id,
+            "entity_pages": {"wiki_context": ["entity"]},
+            "search_results": {"search_context": search}}
+    source = FakeDataset([row("same", []), row("same", ["rich search evidence"]),
+                          row("other", [])])
+    monkeypatch.setattr("src.packet_xrag.data.triviaqa_adapter.load_dataset",
+                        lambda *args, **kwargs: source)
+    selected = TriviaQAAdapter().load_train()
+    assert [item["question_id"] for item in selected] == ["same", "other"]
+    assert selected[0]["search_results"]["search_context"]
