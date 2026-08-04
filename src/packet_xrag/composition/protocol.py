@@ -95,3 +95,13 @@ def assert_evaluation_lock(lock_path, split, maximum_runs):
         raise RuntimeError(f"{split} evaluation budget exhausted")
     return payload
 
+
+def assert_final_100_authorized(authorization_path):
+    """Keep final-100 sealed unless a separate explicit authorization exists."""
+    path = Path(authorization_path)
+    if not path.is_file():
+        raise RuntimeError("final-100 access requires separate explicit authorization")
+    payload = json.loads(path.read_text())
+    if payload.get("explicit_final_100_authorization") is not True:
+        raise RuntimeError("final-100 access requires separate explicit authorization")
+    return payload
